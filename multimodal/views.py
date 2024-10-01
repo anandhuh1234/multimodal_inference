@@ -1,12 +1,14 @@
 import requests
 import torch
 from PIL import Image
-from transformers import MllamaForConditionalGeneration, AutoProcessor, TextStreamer
+from transformers import MllamaForConditionalGeneration, AutoProcessor, TextStreamer, TextIteratorStreamer
 from django.http import StreamingHttpResponse
 from django.views.decorators.csrf import csrf_exempt
 import json
 import validators
 from io import BytesIO
+from threading import Thread
+
 
 # Load model, processor, and streamer once, to avoid reloading on each request
 model_id = "meta-llama/Llama-3.2-11B-Vision-Instruct"
@@ -14,10 +16,8 @@ model = MllamaForConditionalGeneration.from_pretrained(
     model_id, torch_dtype=torch.bfloat16, device_map="auto",
 )
 processor = AutoProcessor.from_pretrained(model_id)
-streamer = TextStreamer(processor)
-
-# url = "https://huggingface.co/datasets/huggingface/documentation-images/resolve/0052a70beed5bf71b92610a43a52df6d286cd5f3/diffusers/rabbit.jpg"
-# image = Image.open(requests.get(url, stream=True).raw)
+# streamer = TextStreamer(processor, skip_prompt=True, **{"skip_special_tokens": True})
+streamer = TextIteratorStreamer(processor, skip_prompt=True, **{"skip_special_tokens": True})
 
 def _ask(question, image):
     # Prepare the input message with the image and text
@@ -34,21 +34,33 @@ def _ask(question, image):
         image,
         input_text,
         add_special_tokens=False,
-        return_tensors="pt"
+        return_tensors="pt",
+
     ).to(model.device)
 
-    with torch.no_grad():
-        generated_output = model.generate(**inputs, streamer=streamer)
+    # with torch.no_grad():
+    #     generated_output = model.generate(**inputs, 
+    #                                       streamer=streamer,
+    #                                       return_dict_in_generate=True,
+    #                                       max_new_tokens=1024)
     
-    for token in generated_output:
-        yield token
+    # for token in generated_output:
+    #     yield token
+
+    # yield "\n"
+
+    generation_kwargs = dict(inputs, streamer=streamer, max_new_tokens=1024)
+    thread = Thread(target=model.generate, kwargs=generation_kwargs)
+    thread.start()
+    for new_text in streamer:
+        yield new_text
 
 @csrf_exempt
 def ask(request):
     if request.method == "POST":
         user_input = request.POST.get("user_input")
         image_input = request.POST.get("image_input")
-
+        print("question: ", user_input)
         if validators.url(image_input):
             image = Image.open(requests.get(image_input, stream=True).raw)
         elif "image_file" in request.FILES:
